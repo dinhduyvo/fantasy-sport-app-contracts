@@ -29,15 +29,8 @@ contract Pool is
     error InvalidWinners();
     error ZeroAddress();
     error InvalidLength();
-    error DuplicateWinner();
-    error InvalidTimelock();
-    error EmergencyCooldownNotPassed();
     error NotParticipant();
-    error InsufficientParticipants();
-    error PoolHasExpired();
     error EmergencyStopActive();
-    error MinimumDurationNotMet();
-    error InvalidPlayerIDs();
 
     // Packed storage for gas optimization
     struct PoolConfig {
@@ -135,7 +128,6 @@ contract Pool is
     event WinnersSelected(address[] winners);
     event InitializationTimelock(uint40 unlockTime);
     event EmergencyStop(bool active);
-    event PoolExpired(uint40 timestamp);
     event PayoutClaimed(address indexed participant, uint256 amount);
     event PlayersSelected(address indexed participant, string[] playerIDs);
     event ContributionReceived(
@@ -222,22 +214,6 @@ contract Pool is
     receive() external payable {}
 
     /**
-     * @notice Modifier to check if pool has expired
-     */
-    modifier checkExpiry() {
-        if (
-            block.timestamp > _config.endTime &&
-            _config.status != uint8(Status.Closed)
-        ) {
-            _config.status = uint8(Status.Expired);
-            emit PoolExpired(uint40(block.timestamp));
-            emit PoolStatusChanged(Status.Expired, uint40(block.timestamp));
-            revert PoolHasExpired();
-        }
-        _;
-    }
-
-    /**
      * @notice Modifier to check emergency stop
      */
     modifier whenNotStopped() {
@@ -262,7 +238,7 @@ contract Pool is
      */
     function joinPool(
         string[] calldata playerIDs
-    ) external payable whenNotPaused whenNotStopped checkExpiry nonReentrant {
+    ) external payable whenNotPaused whenNotStopped nonReentrant {
         if (_config.status != uint8(Status.Open)) revert InvalidStatus();
         if (_participants[msg.sender]) revert AlreadyParticipant();
         if (_participantAddresses.length >= _config.maxParticipants)
@@ -287,7 +263,6 @@ contract Pool is
         onlyOwner
         whenNotPaused
         whenNotStopped
-        checkExpiry
     {
         if (_config.status != uint8(Status.Open)) revert InvalidStatus();
 
