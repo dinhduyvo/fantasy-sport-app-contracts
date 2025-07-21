@@ -8,7 +8,6 @@ import {ReentrancyGuardUpgradeable} from "@openzeppelin/contracts-upgradeable/ut
 import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-import {FOFToken} from "./FOFToken.sol";
 
 /**
  * @title TokenPool
@@ -75,6 +74,7 @@ contract TokenPool is
         address tokenAddress;
     }
 
+
     enum Status {
         Open,
         Running,
@@ -92,7 +92,6 @@ contract TokenPool is
     uint256 private _fixedPrizeAmount;
     uint16 private _managementFeePercentage;
     IERC20 private _token;
-    FOFToken private _fofToken;
 
     // Mappings
     mapping(address => bool) private _participants;
@@ -165,8 +164,7 @@ contract TokenPool is
         uint256 fixedPrizeAmount_,
         uint16 managementFeePercentage_,
         address creator_,
-        address tokenAddress_,
-        address fofTokenAddress_
+        address tokenAddress_
     ) public initializer {
         // Input validation
         if (poolOwner == address(0)) revert ZeroAddress();
@@ -184,7 +182,6 @@ contract TokenPool is
         _fixedPrizeAmount = fixedPrizeAmount_;
         _managementFeePercentage = managementFeePercentage_;
         _token = IERC20(tokenAddress_);
-        _fofToken = FOFToken(fofTokenAddress_);
         
         _config = PoolConfig({
             createdTime: uint40(block.timestamp),
@@ -296,7 +293,7 @@ contract TokenPool is
                 
                 // Mint FOF tokens based on points (1 point = 1 FOF token)
                 if (newPoints[i] > 0) {
-                    _fofToken.mint(_participantAddresses[i], uint256(int256(newPoints[i])) * 1e18);
+                    // FOF token minting removed
                 }
             }
         }

@@ -25,11 +25,7 @@ contract Pool is
     error InvalidAmount();
     error TransferFailed();
     error PoolFull();
-    error NoParticipants();
-    error InvalidWinners();
     error ZeroAddress();
-    error InvalidLength();
-    error NotParticipant();
     error EmergencyStopActive();
 
     // Packed storage for gas optimization
@@ -222,16 +218,6 @@ contract Pool is
     }
 
     /**
-     * @dev Internal function to check if all winners are valid participants
-     * @param winners Array of winner addresses to validate
-     */
-    function _validateWinners(address[] memory winners) private view {
-        for (uint i = 0; i < winners.length; i++) {
-            if (!_participants[winners[i]]) revert NotParticipant();
-        }
-    }
-
-    /**
      * @notice Allows a participant to join the pool
      * @dev Requires exact fee payment and validates pool state
      * @param playerIDs Array of player IDs picked by the participant
@@ -258,12 +244,7 @@ contract Pool is
      * @notice Starts the pool
      * @dev Can only be called by owner when pool is open
      */
-    function startPool()
-        external
-        onlyOwner
-        whenNotPaused
-        whenNotStopped
-    {
+    function startPool() external onlyOwner whenNotPaused whenNotStopped {
         if (_config.status != uint8(Status.Open)) revert InvalidStatus();
 
         _config.status = uint8(Status.Running);
@@ -301,9 +282,6 @@ contract Pool is
                 winners.length == winnersDistribution.length,
                 "Array lengths mismatch"
             );
-
-            // Validate winners
-            _validateWinners(winners);
 
             _winner = winners;
 
@@ -440,7 +418,6 @@ contract Pool is
     function getPickedPlayers(
         address participant
     ) external view returns (string[] memory) {
-        if (!_participants[participant]) revert NotParticipant();
         return _participantPickedPlayers[participant];
     }
 

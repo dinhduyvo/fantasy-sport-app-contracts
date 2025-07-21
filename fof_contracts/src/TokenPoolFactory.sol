@@ -8,7 +8,6 @@ import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/U
 import {TokenPool} from "./TokenPool.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-import {FOFToken} from "./FOFToken.sol";
 
 /**
  * @title TokenPoolFactory
@@ -42,7 +41,6 @@ contract TokenPoolFactory is
     mapping(bytes32 => bool) private _poolNameExists;
     mapping(address => address[]) private _poolsByToken;
     uint256 public activePoolCount;
-    FOFToken public fofToken;
 
     // Structs
     struct TokenPoolParams {
@@ -69,7 +67,7 @@ contract TokenPoolFactory is
     event ContractUpgraded(uint256 version);
 
     // Storage gap for future upgrades (reduced to account for new variables)
-    uint256[43] private __gap;
+    uint256[44] private __gap;
 
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
@@ -81,11 +79,10 @@ contract TokenPoolFactory is
      * @notice Initializes the factory contract
      * @dev Sets up initial state and ownership
      */
-    function initialize(address fofTokenAddress_) public initializer {
+    function initialize() public initializer {
         __Ownable_init(msg.sender);
         __Pausable_init();
         __UUPSUpgradeable_init();
-        fofToken = FOFToken(fofTokenAddress_);
         emit ContractUpgraded(VERSION);
     }
 
@@ -132,8 +129,7 @@ contract TokenPoolFactory is
                 params.fixedPrizeAmount,
                 params.managementFeePercentage,
                 msg.sender,
-                params.tokenAddress,
-                address(fofToken)
+                params.tokenAddress
             )
         {
             poolAddresses.push(newPool);
