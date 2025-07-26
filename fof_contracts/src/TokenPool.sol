@@ -5,28 +5,40 @@ import {Initializable} from "@openzeppelin/contracts-upgradeable/proxy/utils/Ini
 import {OwnableUpgradeable} from "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
 import {PausableUpgradeable} from "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
 import {ReentrancyGuardUpgradeable} from "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
+import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
 /**
- * @title Pool
+ * @title TokenPool
  * @author Your Name
- * @notice A contract for managing betting pools with multiple participants
+ * @notice A contract for managing betting pools with ERC20 tokens and multiple participants
  * @dev Uses OpenZeppelin upgradeable contracts for security and flexibility
  * @custom:security-contact security@yourproject.com
  */
-contract Pool is
+contract TokenPool is
     Initializable,
     OwnableUpgradeable,
     PausableUpgradeable,
-    ReentrancyGuardUpgradeable
+    ReentrancyGuardUpgradeable,
+    UUPSUpgradeable
 {
+    using SafeERC20 for IERC20;
+
     // Custom errors
     error AlreadyParticipant();
     error InvalidStatus();
     error InvalidAmount();
     error TransferFailed();
     error PoolFull();
+    error NoParticipants();
+    error InvalidWinners();
     error ZeroAddress();
+    error InvalidLength();
+    error NotParticipant();
     error EmergencyStopActive();
+    error InsufficientAllowance();
+    error InvalidToken();
 
     // Packed storage for gas optimization
     struct PoolConfig {
@@ -41,7 +53,7 @@ contract Pool is
         bool emergencyStop;
     }
 
-    struct PoolInfo {
+    struct TokenPoolInfo {
         string name;
         address creator;
         uint16 maxParticipants;
@@ -59,30 +71,9 @@ contract Pool is
         string sportType;
         uint256 fixedPrizeAmount;
         uint16 managementFeePercentage;
-        mapping(address => uint256[]) pickedPlayers; // Cannot be included in struct due to Solidity limitations
+        address tokenAddress;
     }
 
-    // Extended PoolInfo for return values (without mappings)
-    struct ExtendedPoolInfo {
-        string name;
-        address creator;
-        uint16 maxParticipants;
-        uint256 joinFee;
-        uint40 createdTime;
-        uint40 startTime;
-        uint40 endTime;
-        address[] winner;
-        uint8 status;
-        uint40 duration;
-        uint256 totalBalance;
-        address[] participantAddresses;
-        int32[] participantPoints;
-        address owner;
-        string sportType;
-        uint256 fixedPrizeAmount;
-        uint16 managementFeePercentage;
-        //string[][] participantPickedPlayers;
-    }
 
     enum Status {
         Open,
@@ -100,6 +91,7 @@ contract Pool is
     string private _sportType;
     uint256 private _fixedPrizeAmount;
     uint16 private _managementFeePercentage;
+    IERC20 private _token;
 
     // Mappings
     mapping(address => bool) private _participants;
@@ -132,12 +124,12 @@ contract Pool is
         string message
     );
 
-    // Storage gap for future upgrades
-    uint256[45] private __gap;
-
     // Add new state variables after the existing ones
     mapping(address => uint256) private _pendingPayouts;
     uint256 private _totalPendingPayouts;
+
+    // Storage gap for future upgrades (reduced to account for new variables)
+    uint256[42] private __gap;
 
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
@@ -145,7 +137,7 @@ contract Pool is
     }
 
     /**
-     * @notice Initializes the pool with given parameters
+     * @notice Initializes the token pool with given parameters
      * @dev Sets up initial state and validates all parameters
      * @param poolName Name of the pool
      * @param fee Entry fee for participants
@@ -157,6 +149,8 @@ contract Pool is
      * @param serviceFeePercentage_ Percentage of fee taken as service charge
      * @param fixedPrizeAmount_ Fixed prize amount
      * @param managementFeePercentage_ Percentage of fee taken as management fee
+     * @param creator_ Address of the pool creator
+     * @param tokenAddress_ Address of the ERC20 token to be used
      */
     function initialize(
         string calldata poolName,
@@ -169,16 +163,16 @@ contract Pool is
         uint8 serviceFeePercentage_,
         uint256 fixedPrizeAmount_,
         uint16 managementFeePercentage_,
-        address creator_
-    ) public payable initializer {
+        address creator_,
+        address tokenAddress_
+    ) public initializer {
         // Input validation
         if (poolOwner == address(0)) revert ZeroAddress();
-        if (msg.value != fixedPrizeAmount_) revert InvalidAmount();
-        if (managementFeePercentage_ > 100) revert InvalidAmount();
 
         __Ownable_init(poolOwner);
         __Pausable_init();
         __ReentrancyGuard_init();
+        __UUPSUpgradeable_init();
 
         _name = poolName;
         _creator = creator_;
@@ -187,6 +181,8 @@ contract Pool is
         _sportType = sportType_;
         _fixedPrizeAmount = fixedPrizeAmount_;
         _managementFeePercentage = managementFeePercentage_;
+        _token = IERC20(tokenAddress_);
+        
         _config = PoolConfig({
             createdTime: uint40(block.timestamp),
             startTime: uint40(startDate),
@@ -199,15 +195,13 @@ contract Pool is
             emergencyStop: false
         });
 
+        // Note: Fixed prize amount transfer is now handled by the factory
+        // The factory will transfer tokens to this pool after initialization
+
         _transferOwnership(poolOwner);
 
         emit InitializationTimelock(uint40(startDate));
     }
-
-    /**
-     * @notice Allow contract to receive ETH
-     */
-    receive() external payable {}
 
     /**
      * @notice Modifier to check emergency stop
@@ -218,25 +212,42 @@ contract Pool is
     }
 
     /**
+     * @dev Internal function to check if all winners are valid participants
+     * @param winners Array of winner addresses to validate
+     */
+    function _validateWinners(address[] memory winners) private view {
+        for (uint i = 0; i < winners.length; i++) {
+            if (!_participants[winners[i]]) revert NotParticipant();
+        }
+    }
+
+    /**
      * @notice Allows a participant to join the pool
-     * @dev Requires exact fee payment and validates pool state
+     * @dev Requires exact fee payment via token transfer and validates pool state
      * @param playerIDs Array of player IDs picked by the participant
      */
     function joinPool(
         string[] calldata playerIDs
-    ) external payable whenNotPaused whenNotStopped nonReentrant {
+    ) external whenNotPaused whenNotStopped nonReentrant {
         if (_config.status != uint8(Status.Open)) revert InvalidStatus();
         if (_participants[msg.sender]) revert AlreadyParticipant();
         if (_participantAddresses.length >= _config.maxParticipants)
             revert PoolFull();
-        if (msg.value != _joinFee) revert InvalidAmount();
+
+        // Check token allowance
+        if (_token.allowance(msg.sender, address(this)) < _joinFee) {
+            revert InsufficientAllowance();
+        }
+
+        // Transfer tokens from participant to pool
+        _token.safeTransferFrom(msg.sender, address(this), _joinFee);
 
         _participants[msg.sender] = true;
         _participantAddresses.push(msg.sender);
         _participantPoints[msg.sender] = 0;
         _participantPickedPlayers[msg.sender] = playerIDs;
 
-        emit ParticipantJoined(msg.sender, msg.value);
+        emit ParticipantJoined(msg.sender, _joinFee);
         emit PlayersSelected(msg.sender, playerIDs);
     }
 
@@ -244,7 +255,12 @@ contract Pool is
      * @notice Starts the pool
      * @dev Can only be called by owner when pool is open
      */
-    function startPool() external onlyOwner whenNotPaused whenNotStopped {
+    function startPool()
+        external
+        onlyOwner
+        whenNotPaused
+        whenNotStopped
+    {
         if (_config.status != uint8(Status.Open)) revert InvalidStatus();
 
         _config.status = uint8(Status.Running);
@@ -257,12 +273,13 @@ contract Pool is
      * @dev Validates winners and distributes prizes according to points
      * @param newPoints Array of points for each participant
      * @param winners Array of winner addresses
+     * @param winnersDistribution Array of distribution percentages for winners
      */
     function endPool(
         int32[] memory newPoints,
         address[] memory winners,
         uint32[] memory winnersDistribution
-    ) public payable onlyOwner {
+    ) public onlyOwner {
         require(
             _config.status == uint8(Status.Running),
             "Pool must be running"
@@ -273,6 +290,11 @@ contract Pool is
             for (uint256 i = 0; i < _participantAddresses.length; i++) {
                 _participantPoints[_participantAddresses[i]] = newPoints[i];
                 emit PointsUpdated(_participantAddresses[i], newPoints[i]);
+                
+                // Mint FOF tokens based on points (1 point = 1 FOF token)
+                if (newPoints[i] > 0) {
+                    // FOF token minting removed
+                }
             }
         }
 
@@ -282,6 +304,9 @@ contract Pool is
                 winners.length == winnersDistribution.length,
                 "Array lengths mismatch"
             );
+
+            // Validate winners
+            _validateWinners(winners);
 
             _winner = winners;
 
@@ -294,16 +319,18 @@ contract Pool is
 
             // Calculate total payout based on pool type
             uint256 totalPayout;
+            uint256 currentBalance = _token.balanceOf(address(this));
+            
             if (_fixedPrizeAmount > 0) {
                 // Fixed prize pool: distribute 100% of fixed prize amount
                 totalPayout = _fixedPrizeAmount;
             } else {
                 // Non-fixed prize pool: distribute 90% of current balance
-                totalPayout = (address(this).balance * 90) / 100;
+                totalPayout = (currentBalance * 90) / 100;
             }
 
             // Validate sufficient balance for payout
-            if (address(this).balance < totalPayout) {
+            if (currentBalance < totalPayout) {
                 revert InvalidAmount();
             }
 
@@ -317,26 +344,24 @@ contract Pool is
                     100;
                 totalPaid += payoutAmount;
 
-                (bool success, ) = winners[i].call{value: payoutAmount}("");
-                require(success, "Transfer to winner failed");
+                _token.safeTransfer(winners[i], payoutAmount);
                 emit PaidForWinner(winners[i], payoutAmount);
             }
         }
 
-        // Transfer to owner as (100 - managementFeePercentage)% of remaining balance
-        uint256 creatorFee = (address(this).balance *
+        // Transfer to creator as (100 - managementFeePercentage)% of remaining balance
+        uint256 remainingBalance = _token.balanceOf(address(this));
+        uint256 creatorFee = (remainingBalance *
             (100 - _managementFeePercentage)) / 100;
         if (creatorFee > 0) {
-            (bool successCreator, ) = _creator.call{value: creatorFee}("");
-            require(successCreator, "Transfer to creator failed");
+            _token.safeTransfer(_creator, creatorFee);
             emit PaidForCreator(_creator, creatorFee);
         }
 
         // Transfer remaining balance to owner as service fee
-        uint256 remainingBalance = address(this).balance;
+        remainingBalance = _token.balanceOf(address(this));
         if (remainingBalance > 0) {
-            (bool successService, ) = _owner.call{value: remainingBalance}("");
-            require(successService, "Transfer to service failed");
+            _token.safeTransfer(_owner, remainingBalance);
             emit PaidForService(_owner, remainingBalance);
         }
 
@@ -350,14 +375,12 @@ contract Pool is
      * @dev Can only be called by owner and has a cooldown period
      */
     function emergencyWithdraw() external onlyOwner nonReentrant {
-        uint256 balance = address(this).balance;
+        uint256 balance = _token.balanceOf(address(this));
         if (balance <= 0) revert InvalidAmount();
 
         _config.lastEmergencyWithdraw = uint40(block.timestamp);
 
-        (bool success, ) = _owner.call{value: balance}("");
-        if (!success) revert TransferFailed();
-
+        _token.safeTransfer(_owner, balance);
         emit EmergencyWithdrawn(_owner, balance);
     }
 
@@ -384,11 +407,11 @@ contract Pool is
 
     /**
      * @notice Returns pool information
-     * @return Extended pool information including picked players
+     * @return Token pool information
      */
-    function getPoolInfo() external view returns (ExtendedPoolInfo memory) {
+    function getPoolInfo() external view returns (TokenPoolInfo memory) {
         return
-            ExtendedPoolInfo({
+            TokenPoolInfo({
                 name: _name,
                 creator: _creator,
                 maxParticipants: _config.maxParticipants,
@@ -399,14 +422,14 @@ contract Pool is
                 winner: _winner,
                 status: _config.status,
                 duration: _config.duration,
-                totalBalance: address(this).balance,
+                totalBalance: _token.balanceOf(address(this)),
                 participantAddresses: _participantAddresses,
                 participantPoints: _getParticipantPoints(),
                 owner: _owner,
                 sportType: _sportType,
                 fixedPrizeAmount: _fixedPrizeAmount,
-                managementFeePercentage: _managementFeePercentage
-                //participantPickedPlayers: _getParticipantPickedPlayers()
+                managementFeePercentage: _managementFeePercentage,
+                tokenAddress: address(_token)
             });
     }
 
@@ -418,6 +441,7 @@ contract Pool is
     function getPickedPlayers(
         address participant
     ) external view returns (string[] memory) {
+        if (!_participants[participant]) revert NotParticipant();
         return _participantPickedPlayers[participant];
     }
 
@@ -427,6 +451,14 @@ contract Pool is
      */
     function getImplementationVersion() external pure returns (uint256) {
         return VERSION;
+    }
+
+    /**
+     * @notice Returns the token address
+     * @return Token contract address
+     */
+    function getTokenAddress() external view returns (address) {
+        return address(_token);
     }
 
     /**
@@ -608,9 +640,25 @@ contract Pool is
         _pendingPayouts[msg.sender] = 0;
         _totalPendingPayouts -= amount;
 
-        (bool success, ) = msg.sender.call{value: amount}("");
-        if (!success) revert TransferFailed();
-
+        _token.safeTransfer(msg.sender, amount);
         emit PayoutClaimed(msg.sender, amount);
+    }
+
+    /**
+     * @dev Authorizes an upgrade to a new implementation
+     * @dev Required by UUPSUpgradeable. Only owner can upgrade.
+     */
+    function _authorizeUpgrade(
+        address newImplementation
+    ) internal override onlyOwner {
+        // Additional upgrade validation can be added here
+    }
+
+    /**
+     * @notice Returns the current implementation version
+     * @return Current version number
+     */
+    function getVersion() external pure returns (uint8) {
+        return VERSION;
     }
 }
